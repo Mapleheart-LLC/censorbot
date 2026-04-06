@@ -298,13 +298,13 @@ async def guild_settings_page(request: Request, guild_id: int):
         row: Optional[GuildSettings] = session.get(GuildSettings, guild_id)
 
     # Determine which censor classes are active for display.
-    if row is not None and row.censor_classes.strip():
+    if row is not None and (row.censor_classes or "").strip():
         active_classes = frozenset(c.strip() for c in row.censor_classes.split(",") if c.strip())
     else:
         active_classes = DEFAULT_CENSOR_CLASSES
 
     # Determine monitored channels for display.
-    if row is not None and row.monitored_channels.strip():
+    if row is not None and (row.monitored_channels or "").strip():
         active_channels = [
             int(c.strip()) for c in row.monitored_channels.split(",") if c.strip()
         ]
@@ -397,7 +397,9 @@ async def save_guild_settings(
                 int(log_channel_id) if log_channel_id and log_channel_id.strip().isdigit() else None
             )
 
-    return RedirectResponse(f"/guilds/{guild_id}?saved=1", status_code=303)
+    # guild_id is a FastAPI-validated int path parameter; build a safe relative URL.
+    safe_redirect = f"/guilds/{int(guild_id)}?saved=1"
+    return RedirectResponse(safe_redirect, status_code=303)
 
 
 # ---------------------------------------------------------------------------
