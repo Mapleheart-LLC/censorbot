@@ -3,7 +3,7 @@ CensorBot – a Discord bot that censors images and videos.
 
 For every message that contains image or video attachments the bot will:
   1. Download each attachment.
-  2. Apply a configurable censoring effect (pixelation or blur).
+  2. Run NudeNet detection and pixelate any explicit regions found.
   3. Delete the original message.
   4. Re-post the message content together with the censored media.
 
@@ -17,9 +17,7 @@ Optional environment variables
 -------------------------------
 MONITORED_CHANNELS   Comma-separated list of channel IDs to watch.
                      Leave empty (the default) to watch every channel.
-CENSOR_MODE          ``pixelate`` (default) or ``blur``.
-PIXEL_BLOCK_SIZE     Integer block size for pixelation (default: 20).
-BLUR_RADIUS          Integer blur radius (default: 20).
+PIXEL_BLOCK_SIZE     Integer pixel block size for pixelation (default: 20).
 """
 
 import io
@@ -32,7 +30,6 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 from censor import (
-    CensorMode,
     censor_image,
     censor_video,
     is_image,
@@ -60,12 +57,7 @@ MONITORED_CHANNELS: set[int] = (
     else set()
 )
 
-CENSOR_MODE: CensorMode = os.getenv("CENSOR_MODE", "pixelate").lower()  # type: ignore[assignment]
-if CENSOR_MODE not in ("pixelate", "blur"):
-    raise ValueError(f"Invalid CENSOR_MODE: {CENSOR_MODE!r}. Must be 'pixelate' or 'blur'.")
-
 PIXEL_BLOCK_SIZE: int = int(os.getenv("PIXEL_BLOCK_SIZE", "20"))
-BLUR_RADIUS: int = int(os.getenv("BLUR_RADIUS", "20"))
 
 # ---------------------------------------------------------------------------
 # Bot setup
@@ -124,9 +116,7 @@ async def on_message(message: discord.Message) -> None:
             if is_image(content_type):
                 censored_data = censor_image(
                     raw_data,
-                    mode=CENSOR_MODE,
                     block_size=PIXEL_BLOCK_SIZE,
-                    blur_radius=BLUR_RADIUS,
                 )
                 # Always output as PNG.
                 stem = PurePosixPath(filename).stem
@@ -136,9 +126,7 @@ async def on_message(message: discord.Message) -> None:
                 censored_data = censor_video(
                     raw_data,
                     input_extension=ext,
-                    mode=CENSOR_MODE,
                     block_size=PIXEL_BLOCK_SIZE,
-                    blur_radius=BLUR_RADIUS,
                 )
                 stem = PurePosixPath(filename).stem
                 out_name = f"{stem}_censored.mp4"
