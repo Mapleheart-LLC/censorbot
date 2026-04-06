@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{% block title %}CensorBot Dashboard{% endblock %}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body class="bg-gray-50 text-gray-900 min-h-screen flex flex-col">
+
+  <nav class="bg-indigo-700 text-white px-6 py-3 flex items-center justify-between shadow-md">
+    <a href="/guilds" class="flex items-center gap-2 text-xl font-bold hover:opacity-90">
+      <span>🤖</span>
+      <span>CensorBot</span>
+    </a>
+    {% if user %}
+    <div class="flex items-center gap-4 text-sm">
+      {% if user.avatar %}
+      <img
+        src="https://cdn.discordapp.com/avatars/{{ user.id }}/{{ user.avatar }}.png?size=32"
+        class="w-8 h-8 rounded-full"
+        alt="{{ user.username }}"
+      />
+      {% endif %}
+      <span class="opacity-80">{{ user.username }}</span>
+      <a href="/logout" class="bg-white/20 hover:bg-white/30 px-3 py-1 rounded transition">
+        Log out
+      </a>
+    </div>
+    {% endif %}
+  </nav>
+
+  <main class="flex-1 max-w-4xl w-full mx-auto px-4 py-8">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="text-center text-xs text-gray-400 py-4">
+    CensorBot Dashboard
+  </footer>
+
+</body>
+</html>

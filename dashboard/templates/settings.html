@@ -1,0 +1,228 @@
+{% extends "base.html" %}
+{% block title %}{{ guild_name }} – Settings – CensorBot Dashboard{% endblock %}
+
+{% block content %}
+
+{# Breadcrumb #}
+<nav class="text-sm text-gray-400 mb-6">
+  <a href="/guilds" class="hover:text-indigo-600">Servers</a>
+  <span class="mx-1">›</span>
+  <span class="text-gray-700 font-medium">{{ guild_name }}</span>
+</nav>
+
+<div class="flex items-center justify-between mb-6">
+  <h1 class="text-2xl font-bold">{{ guild_name }} – Settings</h1>
+  <a
+    href="/guilds/{{ guild_id }}/log"
+    class="text-sm bg-gray-100 hover:bg-gray-200 px-4 py-2 rounded-lg transition"
+  >
+    📋 Audit Log
+  </a>
+</div>
+
+{% if saved %}
+<div class="bg-green-50 border border-green-200 text-green-800 rounded-xl px-4 py-3 mb-6 text-sm">
+  ✅ Settings saved successfully.
+</div>
+{% endif %}
+
+<form method="post" action="/guilds/{{ guild_id }}" x-data="settingsForm()" class="space-y-8">
+
+  {# ── Monitored Channels ── #}
+  <section class="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+    <h2 class="text-lg font-semibold mb-1">Monitored Channels</h2>
+    <p class="text-sm text-gray-500 mb-4">
+      Select specific channels to monitor. Leave all unchecked to monitor every channel.
+    </p>
+    {% if text_channels %}
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-56 overflow-y-auto pr-1">
+      {% for ch in text_channels %}
+      <label class="flex items-center gap-2 text-sm cursor-pointer hover:bg-gray-50 px-2 py-1 rounded">
+        <input
+          type="checkbox"
+          name="monitored_channels"
+          value="{{ ch.id }}"
+          {% if ch.id | string in active_channels | map('string') | list %}checked{% endif %}
+          class="rounded text-indigo-600"
+        />
+        <span class="truncate"># {{ ch.name }}</span>
+      </label>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="text-sm text-gray-400 italic">
+      Channel list unavailable – the bot may not be in this server yet.
+      Enter channel IDs manually:
+    </p>
+    <input
+      type="text"
+      name="monitored_channels_manual"
+      placeholder="e.g. 123456789,987654321"
+      value="{{ active_channels | join(',') }}"
+      class="mt-2 w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+    />
+    {% endif %}
+  </section>
+
+  {# ── Detection Settings ── #}
+  <section class="bg-white rounded-xl shadow-sm border border-gray-100 p-6 space-y-6">
+    <h2 class="text-lg font-semibold">Detection Settings</h2>
+
+    {# Pixel block size #}
+    <div x-data="{ val: {{ row.pixel_block_size if row else 20 }} }">
+      <label class="block text-sm font-medium mb-1">
+        Pixel Block Size
+        <span class="text-indigo-600 font-bold" x-text="val"></span>
+      </label>
+      <p class="text-xs text-gray-400 mb-2">Larger values = bigger pixelation blocks. Range: 5–100.</p>
+      <input
+        type="range" name="pixel_block_size" min="5" max="100" step="1"
+        x-model.number="val"
+        class="w-full accent-indigo-600"
+      />
+    </div>
+
+    {# Min confidence #}
+    <div x-data="{ val: {{ (row.min_confidence if row else 0.0) | round(2) }} }">
+      <label class="block text-sm font-medium mb-1">
+        Minimum Detection Confidence
+        <span class="text-indigo-600 font-bold" x-text="(val * 100).toFixed(0) + '%'"></span>
+      </label>
+      <p class="text-xs text-gray-400 mb-2">
+        Detections below this score are ignored. 0 = accept all; 1 = require 100% certainty.
+      </p>
+      <input
+        type="range" name="min_confidence" min="0" max="1" step="0.01"
+        x-model.number="val"
+        class="w-full accent-indigo-600"
+      />
+    </div>
+
+    {# Video frame sample rate #}
+    <div>
+      <label class="block text-sm font-medium mb-1">Video Frame Sample Rate</label>
+      <p class="text-xs text-gray-400 mb-2">
+        Analyse every Nth frame. Higher = faster processing, lower accuracy.
+      </p>
+      <input
+        type="number" name="video_frame_sample_rate" min="1" max="60"
+        value="{{ row.video_frame_sample_rate if row else 1 }}"
+        class="border border-gray-300 rounded-lg px-3 py-2 text-sm w-32 focus:outline-none focus:ring-2 focus:ring-indigo-400"
+      />
+    </div>
+
+    {# Max file MB #}
+    <div>
+      <label class="block text-sm font-medium mb-1">Max File Size (MB)</label>
+      <p class="text-xs text-gray-400 mb-2">
+        Censored files larger than this are dropped and a warning is posted instead.
+        Discord's standard limit is 8 MB.
+      </p>
+      <input
+        type="number" name="max_file_mb" min="0.1" max="100" step="0.1"
+        value="{{ row.max_file_mb if row else 8.0 }}"
+        class="border border-gray-300 rounded-lg px-3 py-2 text-sm w-32 focus:outline-none focus:ring-2 focus:ring-indigo-400"
+      />
+    </div>
+  </section>
+
+  {# ── Censor Classes ── #}
+  <section class="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+    <h2 class="text-lg font-semibold mb-1">Censor Classes</h2>
+    <p class="text-sm text-gray-500 mb-4">
+      Choose which NudeNet detection labels trigger censoring.
+      Classes marked <span class="text-indigo-600 font-medium">default</span> are active by default when no custom selection is saved.
+    </p>
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+      {% for cls in nudenet_classes %}
+      <label class="flex items-center gap-2 text-sm cursor-pointer hover:bg-gray-50 px-2 py-1 rounded">
+        <input
+          type="checkbox"
+          name="censor_classes"
+          value="{{ cls }}"
+          {% if cls in active_classes %}checked{% endif %}
+          class="rounded text-indigo-600"
+        />
+        <span class="truncate">{{ cls }}</span>
+        {% if cls in default_censor_classes %}
+        <span class="ml-auto text-xs text-indigo-500 font-medium">default</span>
+        {% endif %}
+      </label>
+      {% endfor %}
+    </div>
+  </section>
+
+  {# ── Notifications ── #}
+  <section class="bg-white rounded-xl shadow-sm border border-gray-100 p-6 space-y-5">
+    <h2 class="text-lg font-semibold">Notifications</h2>
+
+    {# DM on censor #}
+    <div class="flex items-center justify-between">
+      <div>
+        <div class="text-sm font-medium">DM Author on Removal</div>
+        <div class="text-xs text-gray-400">Send the original author a private message explaining the removal.</div>
+      </div>
+      <label class="relative inline-flex items-center cursor-pointer" x-data>
+        <input
+          type="checkbox"
+          name="dm_on_censor"
+          value="1"
+          {% if (row is none) or row.dm_on_censor %}checked{% endif %}
+          class="sr-only peer"
+        />
+        <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:bg-indigo-600 transition-colors"></div>
+        <div class="absolute left-0.5 top-0.5 bg-white w-5 h-5 rounded-full shadow transition-transform peer-checked:translate-x-5"></div>
+      </label>
+    </div>
+
+    {# Log channel #}
+    <div>
+      <label class="block text-sm font-medium mb-1">Moderator Log Channel</label>
+      <p class="text-xs text-gray-400 mb-2">
+        Optional. Post an audit embed here every time content is censored.
+      </p>
+      {% if text_channels %}
+      <select
+        name="log_channel_id"
+        class="border border-gray-300 rounded-lg px-3 py-2 text-sm w-full max-w-xs focus:outline-none focus:ring-2 focus:ring-indigo-400"
+      >
+        <option value="">— None —</option>
+        {% for ch in text_channels %}
+        <option
+          value="{{ ch.id }}"
+          {% if row and row.log_channel_id == ch.id %}selected{% endif %}
+        ># {{ ch.name }}</option>
+        {% endfor %}
+      </select>
+      {% else %}
+      <input
+        type="text"
+        name="log_channel_id"
+        placeholder="Channel ID (optional)"
+        value="{{ row.log_channel_id if row and row.log_channel_id else '' }}"
+        class="border border-gray-300 rounded-lg px-3 py-2 text-sm w-48 focus:outline-none focus:ring-2 focus:ring-indigo-400"
+      />
+      {% endif %}
+    </div>
+  </section>
+
+  {# ── Submit ── #}
+  <div class="flex items-center gap-4">
+    <button
+      type="submit"
+      class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-8 py-2.5 rounded-lg shadow transition"
+    >
+      Save Settings
+    </button>
+    <a href="/guilds" class="text-sm text-gray-400 hover:text-gray-600 transition">← Back to servers</a>
+  </div>
+
+</form>
+
+<script>
+function settingsForm() {
+  return {};
+}
+</script>
+
+{% endblock %}

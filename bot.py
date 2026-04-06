@@ -7,14 +7,16 @@ For every message that contains image or video attachments the bot will:
   3. Delete the original message.
   4. Re-post the message content together with the censored media.
 
-Configuration is loaded from a ``.env`` file (see ``.env.example``).
+Per-guild configuration is loaded from the database (see ``settings.py``).
+Environment variables serve as global defaults when no database row exists for
+a guild, and as the sole configuration source when the database is unavailable.
 
 Required environment variable
 ------------------------------
 DISCORD_TOKEN   Discord bot token.
 
-Optional environment variables
--------------------------------
+Optional environment variables (global defaults / fallbacks)
+--------------------------------------------------------------
 MONITORED_CHANNELS     Comma-separated list of channel IDs to watch.
                        Leave empty (the default) to watch every channel.
 PIXEL_BLOCK_SIZE       Integer pixel block size for pixelation (default: 20).
@@ -37,19 +39,18 @@ import io
 import logging
 import os
 from pathlib import PurePosixPath
-from typing import Optional
 
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 
 from censor import (
-    EXPLICIT_CLASSES,
     censor_image,
     censor_video,
     is_image,
     is_video,
 )
+from settings import GuildConfig, load_guild_settings, record_censor_event
 
 load_dotenv()
 
@@ -60,36 +61,11 @@ logging.basicConfig(
 log = logging.getLogger("censorbot")
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Bot-level configuration  (not per-guild)
 # ---------------------------------------------------------------------------
 
 TOKEN: str = os.environ["DISCORD_TOKEN"]
-
-_raw_channels = os.getenv("MONITORED_CHANNELS", "").strip()
-MONITORED_CHANNELS: set[int] = (
-    {int(c.strip()) for c in _raw_channels.split(",") if c.strip()}
-    if _raw_channels
-    else set()
-)
-
-PIXEL_BLOCK_SIZE: int = int(os.getenv("PIXEL_BLOCK_SIZE", "20"))
-MIN_CONFIDENCE: float = float(os.getenv("MIN_CONFIDENCE", "0.0"))
-VIDEO_FRAME_SAMPLE_RATE: int = int(os.getenv("VIDEO_FRAME_SAMPLE_RATE", "1"))
-MAX_FILE_MB: float = float(os.getenv("MAX_FILE_MB", "8.0"))
-DM_ON_CENSOR: bool = os.getenv("DM_ON_CENSOR", "true").strip().lower() in ("1", "true", "yes")
 HEALTH_PORT: int = int(os.getenv("HEALTH_PORT", "8080"))
-
-_raw_log_channel = os.getenv("LOG_CHANNEL_ID", "").strip()
-LOG_CHANNEL_ID: Optional[int] = int(_raw_log_channel) if _raw_log_channel else None
-
-_raw_classes = os.getenv("CENSOR_CLASSES", "").strip()
-CENSOR_CLASSES: Optional[frozenset[str]] = (
-    frozenset(c.strip() for c in _raw_classes.split(",") if c.strip())
-    if _raw_classes
-    else None
-)
-
-MAX_FILE_BYTES: int = int(MAX_FILE_MB * 1024 * 1024)
 
 # ---------------------------------------------------------------------------
 # Bot setup
@@ -139,9 +115,7 @@ async def _start_health_server(port: int) -> None:
 
 async def _run_censor_image(
     data: bytes,
-    block_size: int,
-    min_confidence: float,
-    censor_classes: Optional[frozenset[str]],
+    cfg: GuildConfig,
 ) -> bytes:
     """Offload the CPU-bound image censoring to a thread so the event loop stays responsive."""
     loop = asyncio.get_running_loop()
@@ -150,9 +124,9 @@ async def _run_censor_image(
         functools.partial(
             censor_image,
             data,
-            block_size=block_size,
-            min_confidence=min_confidence,
-            censor_classes=censor_classes,
+            block_size=cfg.pixel_block_size,
+            min_confidence=cfg.min_confidence,
+            censor_classes=cfg.censor_classes,
         ),
     )
 
@@ -160,10 +134,7 @@ async def _run_censor_image(
 async def _run_censor_video(
     data: bytes,
     input_extension: str,
-    block_size: int,
-    min_confidence: float,
-    censor_classes: Optional[frozenset[str]],
-    frame_sample_rate: int,
+    cfg: GuildConfig,
 ) -> bytes:
     """Offload the CPU-bound video censoring to a thread so the event loop stays responsive."""
     loop = asyncio.get_running_loop()
@@ -173,10 +144,10 @@ async def _run_censor_video(
             censor_video,
             data,
             input_extension=input_extension,
-            block_size=block_size,
-            min_confidence=min_confidence,
-            censor_classes=censor_classes,
-            frame_sample_rate=frame_sample_rate,
+            block_size=cfg.pixel_block_size,
+            min_confidence=cfg.min_confidence,
+            censor_classes=cfg.censor_classes,
+            frame_sample_rate=cfg.video_frame_sample_rate,
         ),
     )
 
@@ -198,11 +169,12 @@ async def _dm_author(author: discord.User | discord.Member, channel_name: str) -
 async def _post_to_log_channel(
     message: discord.Message,
     filenames: list[str],
+    log_channel_id: int,
 ) -> None:
     """Post a moderation audit embed to the configured log channel."""
-    channel = bot.get_channel(LOG_CHANNEL_ID)  # type: ignore[arg-type]
+    channel = bot.get_channel(log_channel_id)
     if channel is None:
-        log.warning("Log channel %s not found or bot lacks access", LOG_CHANNEL_ID)
+        log.warning("Log channel %s not found or bot lacks access", log_channel_id)
         return
     if not isinstance(channel, discord.TextChannel):
         return
@@ -221,7 +193,7 @@ async def _post_to_log_channel(
     try:
         await channel.send(embed=embed)
     except discord.HTTPException:
-        log.exception("Failed to post to log channel %s", LOG_CHANNEL_ID)
+        log.exception("Failed to post to log channel %s", log_channel_id)
 
 
 async def _process_message(message: discord.Message) -> None:
@@ -230,8 +202,15 @@ async def _process_message(message: discord.Message) -> None:
     if message.author.bot:
         return
 
+    # DMs have no guild context; skip them.
+    if message.guild is None:
+        return
+
+    # Load per-guild settings from the database (falls back to env defaults).
+    cfg = await load_guild_settings(message.guild.id)
+
     # Honour channel allowlist when configured.
-    if MONITORED_CHANNELS and message.channel.id not in MONITORED_CHANNELS:
+    if cfg.monitored_channels and message.channel.id not in cfg.monitored_channels:
         return
 
     media_attachments = [
@@ -254,33 +233,21 @@ async def _process_message(message: discord.Message) -> None:
             filename = attachment.filename
 
             if is_image(content_type):
-                censored_data = await _run_censor_image(
-                    raw_data,
-                    block_size=PIXEL_BLOCK_SIZE,
-                    min_confidence=MIN_CONFIDENCE,
-                    censor_classes=CENSOR_CLASSES,
-                )
+                censored_data = await _run_censor_image(raw_data, cfg)
                 stem = PurePosixPath(filename).stem
                 out_name = f"{stem}_censored.png"
             else:
                 ext = PurePosixPath(filename).suffix or ".mp4"
-                censored_data = await _run_censor_video(
-                    raw_data,
-                    input_extension=ext,
-                    block_size=PIXEL_BLOCK_SIZE,
-                    min_confidence=MIN_CONFIDENCE,
-                    censor_classes=CENSOR_CLASSES,
-                    frame_sample_rate=VIDEO_FRAME_SAMPLE_RATE,
-                )
+                censored_data = await _run_censor_video(raw_data, ext, cfg)
                 stem = PurePosixPath(filename).stem
                 out_name = f"{stem}_censored.mp4"
 
-            if len(censored_data) > MAX_FILE_BYTES:
+            if len(censored_data) > cfg.max_file_bytes:
                 log.warning(
                     "Censored file %s is %.1f MB, exceeds limit of %.1f MB – skipping attachment",
                     out_name,
                     len(censored_data) / 1024 / 1024,
-                    MAX_FILE_MB,
+                    cfg.max_file_mb,
                 )
                 oversized_names.append(out_name)
                 continue
@@ -316,7 +283,10 @@ async def _process_message(message: discord.Message) -> None:
     original_text = message.content or ""
     notice = f"{author_mention} (censored media)"
     if oversized_names:
-        notice += f"\n⚠️ The following file(s) could not be re-attached because they exceed the {MAX_FILE_MB:.0f} MB limit: {', '.join(oversized_names)}"
+        notice += (
+            f"\n⚠️ The following file(s) could not be re-attached because they exceed "
+            f"the {cfg.max_file_mb:.0f} MB limit: {', '.join(oversized_names)}"
+        )
     send_content = f"{notice}\n{original_text}".strip()
 
     try:
@@ -325,20 +295,26 @@ async def _process_message(message: discord.Message) -> None:
         else:
             await message.channel.send(content=send_content)
     except discord.HTTPException:
-        log.exception(
-            "Failed to send censored message in channel %s", message.channel
-        )
+        log.exception("Failed to send censored message in channel %s", message.channel)
     finally:
         for f in censored_files:
             f.fp.close()
 
+    # Record the censor event to the database for the dashboard audit log.
+    await record_censor_event(
+        message.guild.id,
+        message.channel.id,
+        message.author.id,
+        censored_filenames + oversized_names,
+    )
+
     # Optional: DM the original author.
-    if DM_ON_CENSOR:
+    if cfg.dm_on_censor:
         await _dm_author(message.author, str(message.channel))
 
     # Optional: post to the moderator log channel.
-    if LOG_CHANNEL_ID is not None:
-        await _post_to_log_channel(message, censored_filenames + oversized_names)
+    if cfg.log_channel_id is not None:
+        await _post_to_log_channel(message, censored_filenames + oversized_names, cfg.log_channel_id)
 
 
 # ---------------------------------------------------------------------------
@@ -350,10 +326,7 @@ async def _process_message(message: discord.Message) -> None:
 async def on_ready() -> None:
     global _health_server_started
     log.info("Logged in as %s (ID: %s)", bot.user, bot.user.id)
-    if MONITORED_CHANNELS:
-        log.info("Monitoring channels: %s", MONITORED_CHANNELS)
-    else:
-        log.info("Monitoring all channels.")
+    log.info("Per-guild settings loaded from database on each message.")
     if HEALTH_PORT and not _health_server_started:
         _health_server_started = True
         asyncio.create_task(_start_health_server(HEALTH_PORT))
