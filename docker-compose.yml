@@ -1,0 +1,27 @@
+version: "3.9"
+
+services:
+  censorbot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    # Override individual variables here if you don't want a .env file:
+    # environment:
+    #   DISCORD_TOKEN: "your_token_here"
+    #   HEALTH_PORT: "8080"
+    ports:
+      # Expose the health-check endpoint to the host for external probes.
+      # Remove this if running inside a private network / reverse proxy.
+      - "8080:8080"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s

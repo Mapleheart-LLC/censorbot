@@ -71,7 +71,12 @@ def _get_detector() -> NudeDetector:
 # ---------------------------------------------------------------------------
 
 
-def censor_image(data: bytes, block_size: int = 20) -> bytes:
+def censor_image(
+    data: bytes,
+    block_size: int = 20,
+    min_confidence: float = 0.0,
+    censor_classes: Optional[frozenset[str]] = None,
+) -> bytes:
     """
     Detect explicit regions in *data* with NudeNet and pixelate them.
 
@@ -81,19 +86,30 @@ def censor_image(data: bytes, block_size: int = 20) -> bytes:
         Raw image bytes (JPEG, PNG, GIF, WEBP, …).
     block_size:
         Size of each pixel block used for pixelation.
+    min_confidence:
+        Minimum NudeNet detection score (0–1) required before a region is
+        pixelated.  Detections with a score below this threshold are ignored.
+        Defaults to ``0.0`` (accept all detections).
+    censor_classes:
+        Set of NudeNet class labels to censor.  Defaults to ``None``, which
+        uses the built-in :data:`EXPLICIT_CLASSES` set.  Pass an empty
+        ``frozenset()`` to disable censoring entirely.
 
     Returns
     -------
     PNG bytes with explicit regions pixelated.  If nothing is detected
     the image is returned (as PNG) without any modifications.
     """
+    effective_classes = EXPLICIT_CLASSES if censor_classes is None else censor_classes
     detector = _get_detector()
     detections = detector.detect(data)
 
     with Image.open(io.BytesIO(data)) as img:
         img = img.convert("RGBA")
         for det in detections:
-            if det["class"] not in EXPLICIT_CLASSES:
+            if det["class"] not in effective_classes:
+                continue
+            if det.get("score", 1.0) < min_confidence:
                 continue
             x, y, w, h = det["box"]
             # Guard against zero-size boxes
@@ -111,6 +127,9 @@ def censor_video(
     data: bytes,
     input_extension: str = ".mp4",
     block_size: int = 20,
+    min_confidence: float = 0.0,
+    censor_classes: Optional[frozenset[str]] = None,
+    frame_sample_rate: int = 1,
 ) -> bytes:
     """
     Detect explicit regions per frame with NudeNet and pixelate them.
@@ -123,11 +142,26 @@ def censor_video(
         File extension (including the dot) of the source video, e.g. ``".mp4"``.
     block_size:
         Pixel block size used for pixelation.
+    min_confidence:
+        Minimum NudeNet detection score (0–1) required before a region is
+        pixelated.  Defaults to ``0.0`` (accept all detections).
+    censor_classes:
+        Set of NudeNet class labels to censor.  Defaults to ``None`` which
+        uses the built-in :data:`EXPLICIT_CLASSES` set.
+    frame_sample_rate:
+        Run NudeNet detection on every *Nth* frame only; bounding boxes from
+        the last sampled frame are reused for intermediate frames.  Higher
+        values trade accuracy for speed on long videos.  ``1`` (the default)
+        means every frame is analysed.
 
     Returns
     -------
     MP4 bytes with explicit regions pixelated on every frame.
     """
+    if frame_sample_rate < 1:
+        raise ValueError("frame_sample_rate must be at least 1")
+
+    effective_classes = EXPLICIT_CLASSES if censor_classes is None else censor_classes
     detector = _get_detector()
 
     in_f = tempfile.NamedTemporaryFile(suffix=input_extension, delete=False)
@@ -149,16 +183,27 @@ def censor_video(
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         writer = cv2.VideoWriter(out_path, fourcc, fps, (width, height))
 
+        frame_idx = 0
+        # Carries the boxes (and metadata) from the most-recently sampled frame
+        # forward to intermediate frames so they still get censored.
+        last_active_dets: list[dict] = []
+
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
 
-            # NudeNet accepts numpy arrays (BGR is fine – it converts internally)
-            detections = detector.detect(frame)
-            for det in detections:
-                if det["class"] not in EXPLICIT_CLASSES:
-                    continue
+            if frame_idx % frame_sample_rate == 0:
+                # NudeNet accepts numpy arrays (BGR is fine – it converts internally)
+                raw_dets = detector.detect(frame)
+                last_active_dets = [
+                    det
+                    for det in raw_dets
+                    if det["class"] in effective_classes
+                    and det.get("score", 1.0) >= min_confidence
+                ]
+
+            for det in last_active_dets:
                 x, y, w, h = det["box"]
                 if w <= 0 or h <= 0:
                     continue
@@ -167,6 +212,7 @@ def censor_video(
                     frame[y : y + h, x : x + w] = _pixelate_cv2(region, block_size)
 
             writer.write(frame)
+            frame_idx += 1
 
         cap.release()
         writer.release()

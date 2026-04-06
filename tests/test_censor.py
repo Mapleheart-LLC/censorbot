@@ -9,16 +9,19 @@ unchanged (but re-encoded as PNG).
 """
 
 import io
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 from PIL import Image
 
+import censor as censor_mod
 from censor import (
     EXPLICIT_CLASSES,
     _pixelate_cv2,
     _pixelate_pil,
     censor_image,
+    censor_video,
     is_image,
     is_video,
 )
@@ -40,6 +43,23 @@ def _make_jpeg(width: int = 64, height: int = 64, color=(200, 100, 50)) -> bytes
 def _make_png(width: int = 64, height: int = 64, color=(50, 150, 250, 255)) -> bytes:
     """Return PNG bytes of a solid-colour RGBA image."""
     img = Image.new("RGBA", (width, height), color=color)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _make_gradient_png(width: int = 64, height: int = 64) -> bytes:
+    """Return PNG bytes of a colour-gradient image.
+
+    Each pixel differs from its neighbours so pixelating the image visibly
+    changes it, allowing tests to assert that censor_image actually modified
+    pixels when a detection is applied.
+    """
+    img = Image.new("RGBA", (width, height))
+    pixels = img.load()
+    for x in range(width):
+        for y in range(height):
+            pixels[x, y] = (x * 4 % 256, y * 4 % 256, 100, 255)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
@@ -208,6 +228,119 @@ class TestCensorImage:
 
 
 # ---------------------------------------------------------------------------
+# censor_image – min_confidence / censor_classes (with mocked detector)
+# ---------------------------------------------------------------------------
+
+
+class TestCensorImageMocked:
+    """Tests that mock the NudeNet detector to exercise filtering logic."""
+
+    @patch("censor._get_detector")
+    def test_min_confidence_filters_out_low_score(self, mock_get_detector):
+        """Detections below min_confidence should not be pixelated."""
+        mock_detector = MagicMock()
+        mock_detector.detect.return_value = [
+            {"class": "FEMALE_BREAST_EXPOSED", "score": 0.3, "box": [0, 0, 64, 64]},
+        ]
+        mock_get_detector.return_value = mock_detector
+
+        png_data = _make_png(width=64, height=64, color=(42, 84, 168, 255))
+        result = censor_image(png_data, min_confidence=0.5)
+
+        original = Image.open(io.BytesIO(png_data)).convert("RGBA")
+        censored = Image.open(io.BytesIO(result)).convert("RGBA")
+        # Detection was below threshold – image must be unchanged.
+        assert original.tobytes() == censored.tobytes()
+
+    @patch("censor._get_detector")
+    def test_min_confidence_applies_high_score(self, mock_get_detector):
+        """Detections at or above min_confidence should be pixelated."""
+        mock_detector = MagicMock()
+        mock_detector.detect.return_value = [
+            {"class": "FEMALE_BREAST_EXPOSED", "score": 0.9, "box": [0, 0, 64, 64]},
+        ]
+        mock_get_detector.return_value = mock_detector
+
+        png_data = _make_gradient_png(width=64, height=64)
+        result = censor_image(png_data, min_confidence=0.5)
+
+        original = Image.open(io.BytesIO(png_data)).convert("RGBA")
+        censored = Image.open(io.BytesIO(result)).convert("RGBA")
+        # Detection was applied – pixels must differ.
+        assert original.tobytes() != censored.tobytes()
+
+    @patch("censor._get_detector")
+    def test_empty_censor_classes_skips_all(self, mock_get_detector):
+        """An empty censor_classes set should suppress all pixelation."""
+        mock_detector = MagicMock()
+        mock_detector.detect.return_value = [
+            {"class": "FEMALE_BREAST_EXPOSED", "score": 0.9, "box": [0, 0, 64, 64]},
+        ]
+        mock_get_detector.return_value = mock_detector
+
+        png_data = _make_png(width=64, height=64, color=(42, 84, 168, 255))
+        result = censor_image(png_data, censor_classes=frozenset())
+
+        original = Image.open(io.BytesIO(png_data)).convert("RGBA")
+        censored = Image.open(io.BytesIO(result)).convert("RGBA")
+        assert original.tobytes() == censored.tobytes()
+
+    @patch("censor._get_detector")
+    def test_custom_censor_classes_applied(self, mock_get_detector):
+        """Only classes present in censor_classes should be pixelated."""
+        mock_detector = MagicMock()
+        mock_detector.detect.return_value = [
+            # This class is NOT in the custom set – must not be pixelated.
+            {"class": "BUTTOCKS_EXPOSED", "score": 0.9, "box": [0, 0, 32, 32]},
+            # This class IS in the custom set – must be pixelated.
+            {"class": "MALE_GENITALIA_EXPOSED", "score": 0.9, "box": [32, 32, 32, 32]},
+        ]
+        mock_get_detector.return_value = mock_detector
+
+        png_data = _make_gradient_png(width=64, height=64)
+        result = censor_image(
+            png_data,
+            censor_classes=frozenset({"MALE_GENITALIA_EXPOSED"}),
+        )
+        censored = Image.open(io.BytesIO(result)).convert("RGBA")
+        # At least one detection was applied, so pixels differ somewhere.
+        original = Image.open(io.BytesIO(png_data)).convert("RGBA")
+        assert original.tobytes() != censored.tobytes()
+
+    @patch("censor._get_detector")
+    def test_default_censor_classes_uses_explicit_classes(self, mock_get_detector):
+        """When censor_classes=None the default EXPLICIT_CLASSES is used."""
+        mock_detector = MagicMock()
+        mock_detector.detect.return_value = [
+            {"class": "FEMALE_BREAST_EXPOSED", "score": 0.9, "box": [0, 0, 64, 64]},
+        ]
+        mock_get_detector.return_value = mock_detector
+
+        png_data = _make_gradient_png(width=64, height=64)
+        result = censor_image(png_data)  # censor_classes defaults to None
+
+        original = Image.open(io.BytesIO(png_data)).convert("RGBA")
+        censored = Image.open(io.BytesIO(result)).convert("RGBA")
+        assert original.tobytes() != censored.tobytes()
+
+
+# ---------------------------------------------------------------------------
+# censor_video – frame_sample_rate validation
+# ---------------------------------------------------------------------------
+
+
+class TestCensorVideoFrameSampleRate:
+    def test_invalid_frame_sample_rate_raises(self):
+        """frame_sample_rate < 1 must raise ValueError."""
+        with pytest.raises(ValueError, match="frame_sample_rate"):
+            censor_video(b"", frame_sample_rate=0)
+
+    def test_negative_frame_sample_rate_raises(self):
+        with pytest.raises(ValueError, match="frame_sample_rate"):
+            censor_video(b"", frame_sample_rate=-5)
+
+
+# ---------------------------------------------------------------------------
 # EXPLICIT_CLASSES constant
 # ---------------------------------------------------------------------------
 
@@ -229,3 +362,4 @@ class TestExplicitClasses:
     def test_covered_labels_included(self):
         assert "FEMALE_BREAST_COVERED" in EXPLICIT_CLASSES
         assert "FEMALE_GENITALIA_COVERED" in EXPLICIT_CLASSES
+
