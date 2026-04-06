@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}{{ guild_name }} – Audit Log – CensorBot Dashboard{% endblock %}
+
+{% block content %}
+
+{# Breadcrumb #}
+<nav class="text-sm text-gray-400 mb-6">
+  <a href="/guilds" class="hover:text-indigo-600">Servers</a>
+  <span class="mx-1">›</span>
+  <a href="/guilds/{{ guild_id }}" class="hover:text-indigo-600">{{ guild_name }}</a>
+  <span class="mx-1">›</span>
+  <span class="text-gray-700 font-medium">Audit Log</span>
+</nav>
+
+<div class="flex items-center justify-between mb-6">
+  <h1 class="text-2xl font-bold">{{ guild_name }} – Audit Log</h1>
+  <a
+    href="/guilds/{{ guild_id }}"
+    class="text-sm bg-gray-100 hover:bg-gray-200 px-4 py-2 rounded-lg transition"
+  >
+    ⚙️ Settings
+  </a>
+</div>
+
+{% if events %}
+<div class="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+  <table class="w-full text-sm">
+    <thead class="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
+      <tr>
+        <th class="px-4 py-3 text-left">Time (UTC)</th>
+        <th class="px-4 py-3 text-left">Author ID</th>
+        <th class="px-4 py-3 text-left">Channel ID</th>
+        <th class="px-4 py-3 text-left">Files</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-gray-100">
+      {% for event in events %}
+      <tr class="hover:bg-gray-50 transition">
+        <td class="px-4 py-3 whitespace-nowrap text-gray-500">
+          {{ event.ts.strftime('%Y-%m-%d %H:%M:%S') if event.ts else '—' }}
+        </td>
+        <td class="px-4 py-3 font-mono text-gray-700">{{ event.author_id }}</td>
+        <td class="px-4 py-3 font-mono text-gray-700">
+          <a
+            href="https://discord.com/channels/{{ guild_id }}/{{ event.channel_id }}"
+            target="_blank"
+            class="text-indigo-600 hover:underline"
+          >#{{ event.channel_id }}</a>
+        </td>
+        <td class="px-4 py-3 text-gray-600 max-w-xs truncate">
+          {% set file_list = event.filenames | from_json %}
+          {% if file_list %}
+            {{ file_list | join(', ') }}
+          {% else %}
+            —
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<p class="text-xs text-gray-400 mt-3">Showing the {{ events | length }} most recent events.</p>
+
+{% else %}
+<div class="bg-gray-50 border border-gray-200 rounded-xl p-10 text-center text-gray-500">
+  <p class="text-lg">📭 No censor events recorded yet for this server.</p>
+  <p class="text-sm mt-2">Events appear here once the bot censors media in this server.</p>
+</div>
+{% endif %}
+
+{% endblock %}
